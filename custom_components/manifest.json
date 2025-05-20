@@ -1,12 +1,12 @@
 {
-  "domain": "tcl-ac-hacs",
+  "domain": "tcl_ac_hacs",
   "name": "TCL AC Controller",
-  "documentation": "https://github.com/catalinstroie/tcl-ac-hacs",
+  "documentation": "https://github.com/catalinstroie/tcl_ac_hacs",
   "dependencies": [],
   "codeowners": ["@catalinstroie"],
   "requirements": ["requests_aws4auth==1.2.3", "pyjwt==2.8.0", "aiohttp"],
   "iot_class": "cloud_polled",
-  "version": "0.1.0",
+  "version": "0.0.1",
   "config_flow": true,
-  "loggers": ["custom_components.tcl-ac-hacs"]
+  "loggers": ["custom_components.tcl_ac_hacs"]
 }
