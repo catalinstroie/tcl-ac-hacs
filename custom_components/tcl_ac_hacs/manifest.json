@@ -1,7 +1,7 @@
 {
   "domain": "tcl_ac_hacs",
   "name": "TCL AC Controller",
-  "documentation": "https://github.com/catalinstroie/tcl_ac_hacs",
+  "documentation": "https://github.com/catalinstroie/tcl-ac-hacs",
   "dependencies": [],
   "codeowners": ["@catalinstroie"],
   "requirements": ["requests_aws4auth==1.2.3", "pyjwt==2.8.0", "aiohttp"],
