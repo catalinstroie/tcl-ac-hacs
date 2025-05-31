@@ -1,4 +1,4 @@
-# custom_components/tcl_ac_controller/config_flow.py
+# custom_components/tcl_ac_hacs/config_flow.py
 import logging
 from typing import Any, Dict, Optional
 

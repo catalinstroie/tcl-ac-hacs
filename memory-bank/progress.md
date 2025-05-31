@@ -8,13 +8,15 @@
 
 ## What's Left to Build
 - Further testing of HACS installation and config flow in Home Assistant.
+  - Test environment configured in test_hacs/ directory
+  - Updated hacs.json with proper test configuration
 - Additional features or improvements based on user feedback.
 - Ongoing maintenance and updates as Home Assistant or TCL APIs evolve.
 
 ## Current Status
 - Repository is up to date and pushed to both `main` and `release` branches.
 - All compliance issues identified by HACS have been addressed.
-- Awaiting verification of successful installation via HACS.
+- Test environment prepared for HACS installation verification.
 
 ## Known Issues
 - None currently identified. Pending further user or HACS feedback.

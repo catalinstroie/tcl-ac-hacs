@@ -1,4 +1,4 @@
-# custom_components/tcl_ac_controller/climate.py
+# custom_components/tcl_ac_hacs/climate.py
 import logging
 from typing import Any, Dict, List, Optional
 from datetime import timedelta

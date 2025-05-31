@@ -11,9 +11,18 @@
 - Force-pushed all changes to both `main` and `release` branches on GitHub.
 
 ## Next Steps
-- Verify HACS can now install the integration without compliance errors.
-- Monitor for any further feedback from HACS or users.
-- Continue development and maintenance as needed.
+1. HACS Installation Test:
+   - Add this repository to HACS as a custom repository
+   - Verify successful installation
+   - Check for any compliance warnings
+
+2. Home Assistant Configuration Test:
+   - Add integration via Configuration -> Integrations
+   - Complete config flow
+   - Verify device appears and functions
+
+3. Monitor for any further feedback from HACS or users.
+4. Continue development and maintenance as needed.
 
 ## Active Decisions and Considerations
 - All naming (domain, folder, repo) is now consistent: `tcl-ac-hacs`.
