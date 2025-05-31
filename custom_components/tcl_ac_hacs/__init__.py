@@ -1,4 +1,4 @@
-# custom_components/tcl_ac_controller/__init__.py
+# custom_components/tcl_ac_hacs/__init__.py
 import logging
 
 import voluptuous as vol

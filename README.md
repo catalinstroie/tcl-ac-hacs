@@ -1,4 +1,4 @@
-# TCL AC Controller (tcl-ac-hacs)
+# TCL AC HACS Integration (Home Assistant)
 
 This is a custom integration for Home Assistant to control TCL air conditioners via HACS.
 

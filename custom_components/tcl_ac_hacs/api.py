@@ -1,4 +1,4 @@
-# custom_components/tcl_ac_controller/api.py
+# custom_components/tcl_ac_hacs/api.py
 import asyncio
 import base64
 import hashlib

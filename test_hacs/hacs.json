@@ -1,6 +1,0 @@
-{
-  "name": "Test TCL AC Controller",
-  "render_readme": true,
-  "domains": ["climate"],
-  "homeassistant": "2023.1.0"
-}
