@@ -7,6 +7,7 @@ from homeassistant.components.climate import (
     ClimateEntity,
     ClimateEntityFeature,
     HVACMode,
+    HVACAction,
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import UnitOfTemperature, ATTR_TEMPERATURE
@@ -23,8 +24,8 @@ from .const import DOMAIN, CONF_SELECTED_DEVICES, DEFAULT_SCAN_INTERVAL
 
 _LOGGER = logging.getLogger(__name__)
 
-# Define the HVAC modes your AC supports. Start simple.
-SUPPORTED_HVAC_MODES = [HVACMode.OFF, HVACMode.COOL] # Add HEAT, AUTO, FAN_ONLY etc. as supported
+# Define the HVAC modes your AC supports.
+SUPPORTED_HVAC_MODES = [HVACMode.OFF, HVACMode.COOL, HVACMode.HEAT, HVACMode.AUTO, HVACMode.FAN_ONLY, HVACMode.DRY] # Add modes as supported
 
 async def async_setup_entry(
     hass: HomeAssistant,
@@ -66,6 +67,16 @@ async def async_setup_entry(
             _LOGGER.warning(f"Climate Setup: Device ID {device_id} selected but not found in API response. Skipping.")
             continue
 
+        try:
+            # Fetch device shadow before creating the entity
+            device_shadow_data = await api.get_device_shadow(device_id)
+            if not device_shadow_data:
+                _LOGGER.warning(f"Climate Setup: Device {device_id} shadow not found during setup. Skipping entity creation.")
+                continue
+        except (TclApiError, TclAuthError) as e:
+            _LOGGER.error(f"Climate Setup: Error fetching device shadow for {device_id}: {e}")
+            continue
+
         coordinator = DataUpdateCoordinator(
             hass,
             _LOGGER,
@@ -73,12 +84,16 @@ async def async_setup_entry(
             update_method=lambda dev_id=device_id: _async_update_data(api, dev_id),
             update_interval=timedelta(seconds=DEFAULT_SCAN_INTERVAL),
         )
-        # Fetch initial data
-        await coordinator.async_config_entry_first_refresh()
-        
         coordinators[device_id] = coordinator
-        entities_to_add.append(TclClimateEntity(coordinator, api, device_info_data))
+        _LOGGER.info(f"Climate Setup: Preparing entity for device {device_info_data.get('nickName', device_id)} with device_id: {device_id} and device_info_data: {device_info_data}")
+        entity = TclClimateEntity(coordinator, api, device_info_data, device_shadow_data)
+        entities_to_add.append(entity)
         _LOGGER.info(f"Climate Setup: Prepared entity for device {device_info_data.get('nickName', device_id)}")
+
+        # Fetch initial data (this will now use the shadow data fetched above)
+        # await coordinator.async_config_entry_first_refresh()
+        coordinator.data = device_shadow_data
+        entity._update_attrs(coordinator.data, device_id=device_id)
 
     if entities_to_add:
         async_add_entities(entities_to_add, update_before_add=True)
@@ -91,18 +106,13 @@ async def _async_update_data(api: TclAcApi, device_id: str) -> Dict[str, Any]:
     """Fetch data for a single TCL AC device."""
     _LOGGER.debug(f"Coordinator: Updating data for device {device_id}")
     try:
-        # The get_devices method fetches all devices. We need to find ours.
-        all_devices_response = await api.get_devices() # This also handles auth
-        if all_devices_response and "data" in all_devices_response:
-            for device_data in all_devices_response["data"]:
-                if device_data.get("deviceId") == device_id:
-                    _LOGGER.debug(f"Coordinator: Found data for {device_id}: {device_data}")
-                    return device_data # This is the state for our specific device
-            _LOGGER.warning(f"Coordinator: Device {device_id} not found in API response during update.")
-            raise UpdateFailed(f"Device {device_id} not found in API response.")
-        else:
-            _LOGGER.error(f"Coordinator: Failed to fetch devices or malformed response for {device_id}")
-            raise UpdateFailed("Failed to fetch devices or malformed API response.")
+        # Use the get_device_shadow method to fetch the device's shadow state
+        device_data = await api.get_device_shadow(device_id)
+        if not device_data:
+            _LOGGER.warning(f"Coordinator: Device {device_id} shadow not found in API response during update.")
+            raise UpdateFailed(f"Device {device_id} shadow not found in API response.")
+        _LOGGER.debug(f"Coordinator: Found shadow data for {device_id}: {device_data}")
+        return device_data
     except TclAuthError as err:
         _LOGGER.error(f"Coordinator: Authentication error updating {device_id}: {err}")
         # This will typically be handled by ensure_authenticated, but if it bubbles up, re-raise
@@ -121,13 +131,14 @@ class TclClimateEntity(CoordinatorEntity, ClimateEntity):
     _attr_has_entity_name = True # Use if your entity name is part of device name
     # Or set _attr_name directly if you want full control
 
-    def __init__(self, coordinator: DataUpdateCoordinator, api: TclAcApi, device_data: Dict[str, Any]):
+    def __init__(self, coordinator: DataUpdateCoordinator, api: TclAcApi, device_data: Dict[str, Any], device_shadow_data: Dict[str, Any]):
         """Initialize the TCL AC climate entity."""
         super().__init__(coordinator)
         self._api = api
         self._device_id = device_data.get("deviceId")
         self._device_name = device_data.get("nickName", f"TCL AC {self._device_id[:6]}")
         self._attr_name = self._device_name # Entity name will be this
+        self._device_shadow_data = device_shadow_data
 
         _LOGGER.info(f"Initializing TCLClimateEntity: {self._device_name} (ID: {self._device_id})")
         _LOGGER.debug(f"Initial device data for {self._device_id}: {device_data}")
@@ -144,74 +155,126 @@ class TclClimateEntity(CoordinatorEntity, ClimateEntity):
         # Set static attributes (can be expanded based on device capabilities)
         self._attr_temperature_unit = UnitOfTemperature.CELSIUS # Assuming Celsius
         self._attr_hvac_modes = SUPPORTED_HVAC_MODES
+        self._attr_hvac_mode = HVACMode.OFF # Initialize with default mode
         
-        # Supported features - start basic
-        self._attr_supported_features = ClimateEntityFeature.TURN_ON | ClimateEntityFeature.TURN_OFF
-        # If you add target temp:
-        # self._attr_supported_features |= ClimateEntityFeature.TARGET_TEMPERATURE
+        # Temperature attributes
+        self._attr_min_temp = 16.0
+        self._attr_max_temp = 31.0
+        self._attr_target_temperature_step = 0.5
         
+        # Supported features
+        self._attr_supported_features = (
+            ClimateEntityFeature.TURN_ON | 
+            ClimateEntityFeature.TURN_OFF |
+            ClimateEntityFeature.TARGET_TEMPERATURE
+        )
+
         # Update attributes based on initial data right away
-        self._update_attrs(device_data)
+        self._update_attrs(self._device_shadow_data, device_id=self._device_id)
 
 
     @callback
     def _handle_coordinator_update(self) -> None:
         """Handle updated data from the coordinator."""
         _LOGGER.debug(f"Entity {self.unique_id}: Coordinator update received. Data: {self.coordinator.data}")
-        if self.coordinator.data and self.coordinator.data.get("deviceId") == self._device_id:
-            self._update_attrs(self.coordinator.data)
+        coordinator_device_id = None
+        if (
+            self.coordinator.data
+            and "state" in self.coordinator.data
+            and "reported" in self.coordinator.data["state"]
+        ):
+            reported = self.coordinator.data["state"]["reported"]
+            if reported:
+                coordinator_device_id = reported.get("deviceId")
+            else:
+                coordinator_device_id = None
+        if coordinator_device_id and coordinator_device_id == self._device_id:
+            self._update_attrs(self.coordinator.data, device_id=self._device_id)
             self.async_write_ha_state()
         else:
-            _LOGGER.warning(f"Entity {self.unique_id}: Mismatched device ID in coordinator data or no data.")
+            _LOGGER.warning(
+                f"Entity {self.unique_id}: Mismatched device ID in coordinator data or no data. "
+                f"Entity device_id: {self._device_id}, Coordinator deviceId: {coordinator_device_id}"
+            )
+            _LOGGER.debug(f"Entity {self.unique_id}: Coordinator data: {self.coordinator.data}")
+            if self.coordinator.data and "state" in self.coordinator.data:
+                _LOGGER.debug(f"Entity {self.unique_id}: Coordinator state data: {self.coordinator.data['state']}")
 
 
-    def _update_attrs(self, data: Optional[Dict[str, Any]] = None):
+    def _update_attrs(self, data: Optional[Dict[str, Any]] = None, device_id: str = None):
         """Update entity attributes from API data."""
         if data is None:
             _LOGGER.debug(f"Entity {self.unique_id}: No data provided for attribute update.")
-            # Potentially mark as unavailable or retain last known state
-            # For now, we do nothing if no data, relying on coordinator to provide it
             return
 
-        _LOGGER.debug(f"Entity {self.unique_id}: Updating attributes with data: {data}")
+        if device_id is None:
+            _LOGGER.warning(f"Entity {self.unique_id}: Device ID not provided for attribute update.")
+            return
+
+        _LOGGER.debug(f"Entity tcl_ac_hacs_{device_id}: Updating attributes with data: {data}")
+        _LOGGER.debug(f"Entity tcl_ac_hacs_{device_id}: data: {data}")
         
-        # Example: Extract power state. API response format dependent.
-        # The 'status' field in get_things seems to be a JSON string.
-        device_status_str = data.get("status")
-        actual_status = {}
-        if device_status_str:
-            try:
-                actual_status = json.loads(device_status_str)
-                _LOGGER.debug(f"Entity {self.unique_id}: Parsed device status: {actual_status}")
-            except json.JSONDecodeError:
-                _LOGGER.error(f"Entity {self.unique_id}: Could not parse device status JSON: {device_status_str}")
-        
-        power_state = actual_status.get("powerSwitch") # 0 for off, 1 for on
+        # Extract power state and other attributes from the API response
+        reported_state = data.get("state", {}).get("reported", {})
+        _LOGGER.debug(f"Entity tcl_ac_hacs_{device_id}: reported_state: {reported_state}")
+
+        power_state = reported_state.get("powerSwitch")  # 0 for off, 1 for on
+        target_temp = reported_state.get("targetTemperature")
+        current_temp = reported_state.get("currentTemperature")
+        mode = reported_state.get("workMode")
+
+        _LOGGER.debug(f"Entity tcl_ac_hacs_{device_id}: powerSwitch: {power_state}, target_temp: {target_temp}, current_temp: {current_temp}, mode: {mode}")
+
+        if power_state is not None:
+            _LOGGER.debug(f"Entity tcl_ac_hacs_{device_id}: Extracted powerSwitch: {power_state}")
+        if target_temp is not None:
+            _LOGGER.debug(f"Entity tcl_ac_hacs_{device_id}: Extracted targetTemperature: {target_temp}")
+        if current_temp is not None:
+            _LOGGER.debug(f"Entity tcl_ac_hacs_{device_id}: Extracted currentTemperature: {current_temp}")
+
+        if target_temp is not None:
+            self._attr_target_temperature = float(target_temp)
+
+        if current_temp is not None:
+            self._attr_current_temperature = float(current_temp)
+
+        hvac_mode = HVACMode.OFF
         if power_state == 1:
-            self._attr_hvac_mode = HVACMode.COOL # Or whatever the active mode is if available
-        elif power_state == 0:
-            self._attr_hvac_mode = HVACMode.OFF
-        else:
-            # If powerSwitch is not present or has an unexpected value, HVAC mode is unknown
-            # This might happen if the device is offline or status is not fully reported
-            _LOGGER.warning(f"Entity {self.unique_id}: powerSwitch state is unknown or not 0/1: {power_state}. Current HVAC mode: {self._attr_hvac_mode}")
-            # Keep previous mode or set to OFF or UNKNOWN depending on preference.
-            # self._attr_hvac_mode = HVACMode.OFF # Fallback, or None
+            # Set HVAC mode based on device's operating mode
+            if mode == 0:  # Assuming 0 is COOL, adjust as necessary
+                hvac_mode = HVACMode.COOL
+            elif mode == 1:  # Assuming 1 is HEAT, adjust as necessary
+                hvac_mode = HVACMode.HEAT
+            elif mode == 2: # Assuming 2 is AUTO, adjust as necessary
+                hvac_mode = HVACMode.AUTO
+            elif mode == 4: # Assuming 4 is FAN_ONLY, adjust as necessary
+                hvac_mode = HVACMode.FAN_ONLY
+            elif mode == 3: # Assuming 3 is DRY, adjust as necessary
+                hvac_mode = HVACMode.DRY
+            else:
+                hvac_mode = HVACMode.COOL # Default to cool if unknown
+        self._attr_hvac_mode = hvac_mode
 
-        # Example for current temperature (if available in 'actual_status')
-        # current_temp = actual_status.get("currentTemperature")
-        # if current_temp is not None:
-        #    self._attr_current_temperature = float(current_temp)
+        hvac_action = HVACAction.OFF
+        if power_state == 1:
+            if mode == 0:
+                hvac_action = HVACAction.COOLING
+            elif mode == 1:
+                hvac_action = HVACAction.HEATING
+            elif mode == 2:
+                hvac_action = HVACAction.IDLE
+            elif mode == 3:
+                hvac_action = HVACAction.DRYING
+            elif mode == 4:
+                hvac_action = HVACAction.FAN
+            else:
+                hvac_action = HVACAction.IDLE
+        self._attr_hvac_action = hvac_action
 
-        # Example for target temperature (if available)
-        # target_temp = actual_status.get("targetTemperature")
-        # if target_temp is not None:
-        #    self._attr_target_temperature = float(target_temp)
-        #    if ClimateEntityFeature.TARGET_TEMPERATURE not in self._attr_supported_features:
-        #        self._attr_supported_features |= ClimateEntityFeature.TARGET_TEMPERATURE
-
-        _LOGGER.debug(f"Entity {self.unique_id}: Updated HVAC mode to {self._attr_hvac_mode}")
-
+        _LOGGER.debug(f"Entity {self.unique_id}: Updated HVAC mode to {self._attr_hvac_mode}, "
+                      f"target_temperature={self._attr_target_temperature}, "
+                      f"current_temperature={self._attr_current_temperature}, "
+                      f"hvac_action={self._attr_hvac_action}")
 
     @property
     def hvac_mode(self) -> HVACMode | None:
@@ -224,7 +287,7 @@ class TclClimateEntity(CoordinatorEntity, ClimateEntity):
         _LOGGER.info(f"Entity {self.unique_id}: Setting HVAC mode to {hvac_mode}")
         if hvac_mode == HVACMode.OFF:
             await self.async_turn_off()
-        elif hvac_mode in [HVACMode.COOL, HVACMode.HEAT, HVACMode.AUTO, HVACMode.FAN_ONLY]: # Add other modes if supported
+        elif hvac_mode in [HVACMode.COOL, HVACMode.HEAT, HVACMode.AUTO, HVACMode.FAN_ONLY, HVACMode.DRY]: # Add other modes if supported
             # For now, COOL implies turning ON.
             # A more sophisticated AC might have separate commands for mode and power.
             # The 'powerSwitch' seems to be the primary control.
@@ -247,7 +310,8 @@ class TclClimateEntity(CoordinatorEntity, ClimateEntity):
         _LOGGER.info(f"Entity {self.unique_id}: Turning ON")
         try:
             await self._api.set_power(self._device_id, True)
-            self._attr_hvac_mode = HVACMode.COOL # Assume COOL when turned on, adjust if state known
+            # Set HVAC mode to COOL when turning on, adjust if a different mode is active
+            self._attr_hvac_mode = HVACMode.COOL
             self.async_write_ha_state()
             await self.coordinator.async_request_refresh()
         except (TclApiError, TclAuthError) as e:
@@ -264,17 +328,36 @@ class TclClimateEntity(CoordinatorEntity, ClimateEntity):
         except (TclApiError, TclAuthError) as e:
             _LOGGER.error(f"Entity {self.unique_id}: Error turning off: {e}")
 
-    # Implement other methods like async_set_temperature if your AC supports it
-    # async def async_set_temperature(self, **kwargs: Any) -> None:
-    #     """Set new target temperature."""
-    #     temperature = kwargs.get(ATTR_TEMPERATURE)
-    #     if temperature is None:
-    #         return
-    #     _LOGGER.info(f"Entity {self.unique_id}: Setting temperature to {temperature}")
-    #     try:
-    #         await self._api.control_device(self._device_id, {"targetTemperature": temperature}) # Example command
-    #         self._attr_target_temperature = temperature
-    #         self.async_write_ha_state()
-    #         await self.coordinator.async_request_refresh()
-    #     except (TclApiError, TclAuthError) as e:
-    #         _LOGGER.error(f"Entity {self.unique_id}: Error setting temperature: {e}")
+    def turn_on(self) -> None:
+        """Turn the entity on."""
+        asyncio.run_coroutine_threadsafe(self.async_turn_on(), self.hass.loop)
+
+    def turn_off(self) -> None:
+        """Turn the entity off."""
+        asyncio.run_coroutine_threadsafe(self.async_turn_off(), self.hass.loop)
+
+    async def async_set_temperature(self, **kwargs: Any) -> None:
+        """Set new target temperature."""
+        temperature = kwargs.get(ATTR_TEMPERATURE)
+        if temperature is None:
+            _LOGGER.warning(f"Entity {self.unique_id}: No temperature provided.")
+            return
+
+        # Validate temperature is within allowed range
+        if not (self._attr_min_temp <= temperature <= self._attr_max_temp):
+            _LOGGER.error(
+                f"Entity {self.unique_id}: Temperature {temperature} is outside valid range "
+                f"({self._attr_min_temp} - {self._attr_max_temp})"
+            )
+            return
+
+        _LOGGER.info(f"Entity {self.unique_id}: Setting temperature to {temperature}")
+        try:
+            await self._api.set_temperature(self._device_id, temperature)
+            self._attr_target_temperature = temperature
+            self.async_write_ha_state()
+            await self.coordinator.async_request_refresh()
+        except (TclApiError, TclAuthError) as e:
+            _LOGGER.error(f"Entity {self.unique_id}: Error setting temperature: {e}")
+        except Exception as e:
+            _LOGGER.exception(f"Entity {self.unique_id}: Unexpected error setting temperature: {e}")
