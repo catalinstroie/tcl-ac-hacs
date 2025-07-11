@@ -5,8 +5,8 @@
         "title": "TCL AC Controller Setup",
         "description": "Enter your TCL account credentials.",
         "data": {
-          "username": "Email Address",
-          "password": "Password"
+          "username": "TCL Home email",
+          "password": "TCL Home password"
         }
       },
       "select_devices": {

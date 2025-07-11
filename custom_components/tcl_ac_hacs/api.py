@@ -17,6 +17,9 @@ from .const import (
     ACCOUNT_LOGIN_URL, APP_ID, AWS_COGNITO_URL, AWS_IOT_ENDPOINT, AWS_IOT_REGION,
     CLIENT_ID, CONTENT_TYPE, GET_THINGS_URL, HARDCODED_IDENTITY_ID,
     REFRESH_TOKENS_URL, TH_APPBUILD, TH_PLATFORM, TH_VERSION, USER_AGENT,
+    API_PARAM_NEW_WIND_SET_MODE, API_PARAM_NEW_WIND_STRENGTH,
+    API_PARAM_NEW_WIND_AUTO_SWITCH, API_PARAM_NEW_WIND_SWITCH,
+    API_PARAM_POWER_SWITCH, API_PARAM_VERTICAL_DIRECTION, API_PARAM_HORIZONTAL_DIRECTION,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -40,19 +43,21 @@ class TclAcApi:
         self._username = username
         self._password_hash = hashlib.md5(password.encode()).hexdigest()
         
-        self._access_token: Optional[str] = None
-        self._country: Optional[str] = None
-        self._api_username: Optional[str] = None # This is the username returned by API, might be same as input
-        
-        self._cognito_token: Optional[str] = None
-        self._saas_token: Optional[str] = None
-        self._cognito_token_expiry: Optional[datetime.datetime] = None
-        
-        self._aws_access_key_id: Optional[str] = None
-        self._aws_secret_key: Optional[str] = None
-        self._aws_session_token: Optional[str] = None
-        self._aws_credentials_expiry: Optional[datetime.datetime] = None
+        # Initialize all attributes
+        self._access_token = None
+        self._country = None
+        self._api_username = None
+        self._cognito_token = None
+        self._saas_token = None
+        self._cognito_token_expiry = None
+        self._aws_access_key_id = None
+        self._aws_secret_key = None
+        self._aws_session_token = None
+        self._aws_credentials_expiry = None
 
+    async def authenticate(self):
+        """Perform authentication with TCL API."""
+        await self.ensure_authenticated()
 
     async def _request(self, method: str, url: str, headers: Dict[str, Any], 
                        json_data: Optional[Dict[str, Any]] = None, 
@@ -110,8 +115,14 @@ class TclAcApi:
             if e.response.status_code in [401, 403]:
                 raise TclAuthError(f"Authentication failed: {e.response.status_code}") from e
             raise TclApiError(f"API request failed: {e.response.status_code}") from e
+        except aiohttp.ClientConnectionError as e:
+            _LOGGER.error(f"API Connection Error: {e} for {url}")
+            raise TclApiError(f"API connection failed: {e}") from e
+        except asyncio.TimeoutError:
+            _LOGGER.error(f"API request timed out for {url}")
+            raise TclApiError("API request timed out")
         except Exception as e:
-            _LOGGER.error(f"Unexpected API error for {url}: {e}", exc_info=True)
+            _LOGGER.exception(f"Unexpected API error for {url}: {e}")
             raise TclApiError(f"Unexpected API error: {e}") from e
 
 
@@ -349,5 +360,96 @@ class TclAcApi:
 
     async def set_power(self, device_id: str, power_on: bool) -> Dict[str, Any]:
         """Helper to turn device on or off."""
-        command = {"powerSwitch": 1 if power_on else 0}
+        if power_on:
+            command = {API_PARAM_POWER_SWITCH: 1}
+        else:
+            command = {
+                API_PARAM_POWER_SWITCH: 0,
+                API_PARAM_VERTICAL_DIRECTION: 8,   # Default "parked" position from logs
+                API_PARAM_HORIZONTAL_DIRECTION: 8, # Default "parked" position from logs
+            }
+        return await self.control_device(device_id, command)
+
+    async def set_temperature(self, device_id: str, temperature: float) -> Dict[str, Any]:
+        """Helper to set target temperature."""
+        command = {"targetTemperature": temperature}
+        return await self.control_device(device_id, command)
+
+    async def get_device_shadow(self, device_id: str) -> Dict[str, Any]:
+        """Get device shadow."""
+        await self.ensure_authenticated() # Make sure we have AWS creds
+
+        if not self._aws_access_key_id or not self._aws_secret_key or not self._aws_session_token:
+            _LOGGER.error("AWS credentials not available for device control.")
+            raise TclAuthError("AWS credentials missing for device control.")
+
+        url = f"https://{AWS_IOT_ENDPOINT}/things/{device_id}/shadow"
+        
+        # Headers for AWS IoT data plane are slightly different
+        # The AWS4Auth will add the Authorization header.
+        # X-Amz-Date is also typically added by the signing library or needs to be very current.
+        # We are using requests_aws4auth which expects requests.
+        
+        aws_headers = {
+            "Content-Type": "application/x-amz-json-1.0", # Original script used this
+            # "X-Amz-Security-Token": self._aws_session_token, # Added by AWS4Auth
+            "User-Agent": "aws-sdk-iOS/2.26.2 iOS/18.4.1 en_RO", # As per original
+            # "X-Amz-Date": time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) # Added by AWS4Auth
+        }
+        
+        auth = AWS4Auth(
+            self._aws_access_key_id,
+            self._aws_secret_key,
+            AWS_IOT_REGION,
+            'iotdata', # Service name for IoT Data Plane
+            session_token=self._aws_session_token
+        )
+        
+        _LOGGER.info(f"Getting device shadow for {device_id}")
+        try:
+            # This call will be run in an executor due to AWS4Auth being synchronous
+            response_data = await self._request("GET", url, aws_headers, auth=auth, is_aws_iot=True)
+            _LOGGER.debug(f"get_device_shadow API response for {device_id}: {response_data}")
+            if not response_data:
+                _LOGGER.warning(f"Device {device_id} shadow is empty. Returning empty dict")
+                return {}
+            return response_data
+        except Exception as e:
+            _LOGGER.error(f"Error getting device shadow for {device_id}: {e}", exc_info=True)
+            raise
+
+    async def async_set_fresh_air(
+        self,
+        device_id: str,
+        switch_state: Optional[int] = None,
+        mode: Optional[int] = None,
+        strength: Optional[int] = None,
+        auto_switch: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """Control the fresh air system of the device."""
+        command = {}
+        if switch_state is not None:
+            command[API_PARAM_NEW_WIND_SWITCH] = switch_state
+        
+        # Only add mode, strength, auto_switch if not explicitly turning off
+        # Or if switch_state is 1 (on) or None (meaning we are just setting mode/speed on an already on device)
+        if switch_state != 0: # API might ignore these if switch_state is 0, but being explicit
+            if mode is not None:
+                command[API_PARAM_NEW_WIND_SET_MODE] = mode
+            if strength is not None:
+                command[API_PARAM_NEW_WIND_STRENGTH] = strength
+            if auto_switch is not None:
+                command[API_PARAM_NEW_WIND_AUTO_SWITCH] = auto_switch
+            elif strength is not None: # If strength is set manually, ensure auto_switch is off
+                command[API_PARAM_NEW_WIND_AUTO_SWITCH] = 0
+
+
+        if not command:
+            _LOGGER.warning(f"No fresh air parameters provided for device {device_id}. No action taken.")
+            return {}
+
+        _LOGGER.info(f"Setting fresh air for device {device_id} with command: {command}")
+        # Note: The mitmproxy logs showed other parameters like selfClean, verticalDirection, horizontalDirection
+        # in some fresh air commands. These are currently omitted as their necessity is unclear.
+        # If issues arise, these might need to be conditionally included.
         return await self.control_device(device_id, command)
