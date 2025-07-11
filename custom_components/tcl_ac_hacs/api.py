@@ -40,19 +40,21 @@ class TclAcApi:
         self._username = username
         self._password_hash = hashlib.md5(password.encode()).hexdigest()
         
-        self._access_token: Optional[str] = None
-        self._country: Optional[str] = None
-        self._api_username: Optional[str] = None # This is the username returned by API, might be same as input
-        
-        self._cognito_token: Optional[str] = None
-        self._saas_token: Optional[str] = None
-        self._cognito_token_expiry: Optional[datetime.datetime] = None
-        
-        self._aws_access_key_id: Optional[str] = None
-        self._aws_secret_key: Optional[str] = None
-        self._aws_session_token: Optional[str] = None
-        self._aws_credentials_expiry: Optional[datetime.datetime] = None
+        # Initialize all attributes
+        self._access_token = None
+        self._country = None
+        self._api_username = None
+        self._cognito_token = None
+        self._saas_token = None
+        self._cognito_token_expiry = None
+        self._aws_access_key_id = None
+        self._aws_secret_key = None
+        self._aws_session_token = None
+        self._aws_credentials_expiry = None
 
+    async def authenticate(self):
+        """Perform authentication with TCL API."""
+        await self.ensure_authenticated()
 
     async def _request(self, method: str, url: str, headers: Dict[str, Any], 
                        json_data: Optional[Dict[str, Any]] = None, 
@@ -110,8 +112,14 @@ class TclAcApi:
             if e.response.status_code in [401, 403]:
                 raise TclAuthError(f"Authentication failed: {e.response.status_code}") from e
             raise TclApiError(f"API request failed: {e.response.status_code}") from e
+        except aiohttp.ClientConnectionError as e:
+            _LOGGER.error(f"API Connection Error: {e} for {url}")
+            raise TclApiError(f"API connection failed: {e}") from e
+        except asyncio.TimeoutError:
+            _LOGGER.error(f"API request timed out for {url}")
+            raise TclApiError("API request timed out")
         except Exception as e:
-            _LOGGER.error(f"Unexpected API error for {url}: {e}", exc_info=True)
+            _LOGGER.exception(f"Unexpected API error for {url}: {e}")
             raise TclApiError(f"Unexpected API error: {e}") from e
 
 
@@ -351,3 +359,51 @@ class TclAcApi:
         """Helper to turn device on or off."""
         command = {"powerSwitch": 1 if power_on else 0}
         return await self.control_device(device_id, command)
+
+    async def set_temperature(self, device_id: str, temperature: float) -> Dict[str, Any]:
+        """Helper to set target temperature."""
+        command = {"targetTemperature": temperature}
+        return await self.control_device(device_id, command)
+
+    async def get_device_shadow(self, device_id: str) -> Dict[str, Any]:
+        """Get device shadow."""
+        await self.ensure_authenticated() # Make sure we have AWS creds
+
+        if not self._aws_access_key_id or not self._aws_secret_key or not self._aws_session_token:
+            _LOGGER.error("AWS credentials not available for device control.")
+            raise TclAuthError("AWS credentials missing for device control.")
+
+        url = f"https://{AWS_IOT_ENDPOINT}/things/{device_id}/shadow"
+        
+        # Headers for AWS IoT data plane are slightly different
+        # The AWS4Auth will add the Authorization header.
+        # X-Amz-Date is also typically added by the signing library or needs to be very current.
+        # We are using requests_aws4auth which expects requests.
+        
+        aws_headers = {
+            "Content-Type": "application/x-amz-json-1.0", # Original script used this
+            # "X-Amz-Security-Token": self._aws_session_token, # Added by AWS4Auth
+            "User-Agent": "aws-sdk-iOS/2.26.2 iOS/18.4.1 en_RO", # As per original
+            # "X-Amz-Date": time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) # Added by AWS4Auth
+        }
+        
+        auth = AWS4Auth(
+            self._aws_access_key_id,
+            self._aws_secret_key,
+            AWS_IOT_REGION,
+            'iotdata', # Service name for IoT Data Plane
+            session_token=self._aws_session_token
+        )
+        
+        _LOGGER.info(f"Getting device shadow for {device_id}")
+        try:
+            # This call will be run in an executor due to AWS4Auth being synchronous
+            response_data = await self._request("GET", url, aws_headers, auth=auth, is_aws_iot=True)
+            _LOGGER.debug(f"get_device_shadow API response for {device_id}: {response_data}")
+            if not response_data:
+                _LOGGER.warning(f"Device {device_id} shadow is empty. Returning empty dict")
+                return {}
+            return response_data
+        except Exception as e:
+            _LOGGER.error(f"Error getting device shadow for {device_id}: {e}", exc_info=True)
+            raise
