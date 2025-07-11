@@ -7,6 +7,8 @@ CONF_PASSWORD = "password"
 CONF_REGION = "region"
 CONF_DEVICES = "devices"
 CONF_SELECTED_DEVICES = "selected_devices"
+PLATFORMS = ["climate"]
+DEFAULT_SCAN_INTERVAL = 1800  # Default update interval in seconds
 
 # API constants
 ACCOUNT_LOGIN_URL = "https://pa.account.tcl.com/account/login?clientId=54148614"
