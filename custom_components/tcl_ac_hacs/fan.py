@@ -5,10 +5,8 @@ from typing import Any, Dict, List, Optional
 from homeassistant.components.fan import (
     FanEntity,
     FanEntityFeature,
-    SPEED_OFF, # Not used directly for API, but for state
-    SPEED_LOW,
-    SPEED_MEDIUM,
-    SPEED_HIGH,
+    # SPEED_OFF, SPEED_LOW, SPEED_MEDIUM, SPEED_HIGH are not directly importable
+    # or may be deprecated depending on HA version. We'll use string literals.
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
@@ -39,7 +37,9 @@ from .const import (
     PRESET_FRESH_AIR_BREATHING,
     PRESET_FRESH_AIR_EXHAUST,
     PRESET_FRESH_AIR_PURIFICATION,
-    # Using HA standard speeds where possible, and custom if needed
+    FAN_SPEED_LOW, # Imported from .const
+    FAN_SPEED_MEDIUM, # Imported from .const
+    FAN_SPEED_HIGH, # Imported from .const
     FAN_SPEED_AUTO, # Custom "auto" speed if API supports it via newWindAutoSwitch
 )
 
@@ -68,9 +68,9 @@ API_SPEED_VALUES = [1, 2, 3]
 # Mapping HA speeds to API values
 # For simplicity, let's map HA's LOW, MEDIUM, HIGH to API's 1, 2, 3
 HA_SPEED_TO_API_STRENGTH = {
-    SPEED_LOW: 1,
-    SPEED_MEDIUM: 2,
-    SPEED_HIGH: 3,
+    FAN_SPEED_LOW: 1,
+    FAN_SPEED_MEDIUM: 2,
+    FAN_SPEED_HIGH: 3,
 }
 API_STRENGTH_TO_HA_SPEED = {v: k for k, v in HA_SPEED_TO_API_STRENGTH.items()}
 
@@ -113,7 +113,7 @@ async def async_setup_entry(
 
     if entities_to_add:
         async_add_entities(entities_to_add, update_before_add=False) # Data should be fresh from coordinator
-        _LOGGER.info(f"Added {len(entities)} TCL Fresh Air fan entities.")
+        _LOGGER.info(f"Added {len(entities_to_add)} TCL Fresh Air fan entities.")
 
 class TclFreshAirFan(CoordinatorEntity, FanEntity):
     """Representation of a TCL Fresh Air Fan."""
@@ -135,21 +135,38 @@ class TclFreshAirFan(CoordinatorEntity, FanEntity):
             # model and sw_version can be inherited from the main device if available
         }
 
-        self._attr_supported_features = FanEntityFeature.PRESET_MODE | FanEntityFeature.SET_SPEED
+        self._attr_supported_features = (
+            FanEntityFeature.PRESET_MODE |
+            FanEntityFeature.SET_SPEED |  # For named speeds via speed_list + async_set_speed
+            FanEntityFeature.TURN_ON |
+            FanEntityFeature.TURN_OFF
+        )
         self._attr_preset_modes = SUPPORTED_PRESET_MODES
         
         # Initialize attributes
         self._attr_is_on = None
-        self._attr_percentage = None
+        self._attr_percentage = None # Explicitly set to None if not used
+        self._attr_speed: Optional[str] = None # Current named speed
         self._attr_preset_mode = None
-        self._attr_speed_count = len(API_SPEED_VALUES) # For percentage mapping
+        # self._attr_speed_count is not needed if we use speed_list
 
         self._update_attrs(coordinator.data) # Initial update
 
     @property
-    def percentage_step(self) -> float:
-        """Return the step size for percentage."""
-        return 100 / self._attr_speed_count
+    def speed_list(self) -> list[str]:
+        """Get the list of available speeds."""
+        return [FAN_SPEED_LOW, FAN_SPEED_MEDIUM, FAN_SPEED_HIGH, FAN_SPEED_AUTO]
+
+    # Remove percentage_step as we are moving to named speeds primarily
+    # @property
+    # def percentage_step(self) -> float:
+    #    """Return the step size for percentage."""
+    #    return 100 / self._attr_speed_count
+
+    @property # Added for current speed
+    def speed(self) -> Optional[str]:
+        """Return the current speed."""
+        return self._attr_speed
 
     @callback
     def _handle_coordinator_update(self) -> None:
@@ -170,23 +187,11 @@ class TclFreshAirFan(CoordinatorEntity, FanEntity):
         reported_state = data["state"]["reported"]
         _LOGGER.debug(f"Fresh Air Fan {self.unique_id}: Reported state: {reported_state}")
 
-        # Determine if fan is on based on newWindSwitch
+        # Determine if fan is on based on newWindSwitch.
+        # This is the primary and most reliable source of the on/off state.
+        # The fan is 'on' if and only if newWindSwitch is 1.
         new_wind_switch_state = reported_state.get(API_PARAM_NEW_WIND_SWITCH)
-        if new_wind_switch_state == 1:
-            self._attr_is_on = True
-        elif new_wind_switch_state == 0:
-            self._attr_is_on = False
-        else:
-            # Fallback if newWindSwitch is not reported, try to infer from strength/auto
-            # This fallback might be removed if newWindSwitch is reliably reported
-            strength_fallback = reported_state.get(API_PARAM_NEW_WIND_STRENGTH)
-            auto_switch_fallback = reported_state.get(API_PARAM_NEW_WIND_AUTO_SWITCH)
-            if strength_fallback is not None and strength_fallback > 0:
-                self._attr_is_on = True
-            elif auto_switch_fallback == API_FRESH_AIR_AUTO_ON:
-                self._attr_is_on = True
-            else:
-                self._attr_is_on = None # Or False, truly unknown
+        self._attr_is_on = (new_wind_switch_state == 1)
         
         strength = reported_state.get(API_PARAM_NEW_WIND_STRENGTH)
         auto_switch = reported_state.get(API_PARAM_NEW_WIND_AUTO_SWITCH)
@@ -195,57 +200,51 @@ class TclFreshAirFan(CoordinatorEntity, FanEntity):
         api_mode = reported_state.get(API_PARAM_NEW_WIND_SET_MODE)
         self._attr_preset_mode = API_MODE_TO_HA_PRESET.get(api_mode)
 
-        # Update percentage (speed)
+        # Update speed
         if auto_switch == API_FRESH_AIR_AUTO_ON:
-            # If newWindAutoSwitch is 1, HA speed should be "auto"
-            # We need to decide how to represent this. For now, let's set percentage to a value
-            # that maps to an "auto" speed string if we use named speeds.
-            # Or, if FanEntity supports an "auto" speed directly.
-            # For percentage based, this is tricky. Let's assume a specific percentage for "auto" or handle via speed_list.
-            # For now, if auto is on, we'll set percentage to a high value to indicate it's running.
-            # This needs refinement based on how SPEED_AUTO is handled with percentages.
-             self._attr_percentage = 100 # Placeholder for auto
+            self._attr_speed = FAN_SPEED_AUTO
         elif strength is not None and strength in API_STRENGTH_TO_HA_SPEED:
-            self._attr_percentage = ranged_value_to_percentage(API_SPEED_VALUES, strength)
-        else:
-            self._attr_percentage = 0 # Off or unknown strength
+            self._attr_speed = API_STRENGTH_TO_HA_SPEED[strength]
+        elif self._attr_is_on: # If it's on but speed is unknown, perhaps set to a default or None
+            self._attr_speed = None # Or a default like FAN_SPEED_LOW
+        else: # Off
+            self._attr_speed = None # No speed when off (or could be previous speed)
 
-        _LOGGER.debug(f"Fresh Air Fan {self.unique_id}: Updated: On={self._attr_is_on}, Preset={self._attr_preset_mode}, Percentage={self._attr_percentage}, Strength={strength}, AutoSwitch={auto_switch}")
+        _LOGGER.debug(f"Fresh Air Fan {self.unique_id}: Updated: On={self._attr_is_on}, Preset={self._attr_preset_mode}, Speed={self._attr_speed}, Strength={strength}, AutoSwitch={auto_switch}")
 
-    async def async_turn_on(self, percentage: Optional[int] = None, preset_mode: Optional[str] = None, **kwargs: Any) -> None:
-        _LOGGER.info(f"Fresh Air Fan {self.unique_id}: Turning ON. Percentage: {percentage}, Preset: {preset_mode}")
-        # Default to turning on the switch. Specific mode/speed can override.
-        command_payload = {"switch_state": 1} 
-        update_optimistic_state = True
+    async def async_turn_on(self, speed: Optional[str] = None, preset_mode: Optional[str] = None, **kwargs: Any) -> None:
+        _LOGGER.info(f"Fresh Air Fan {self.unique_id}: Turning ON. Speed: {speed}, Preset: {preset_mode}")
+        
+        command_payload = {"switch_state": 1}
 
         if preset_mode is not None:
-            if preset_mode not in SUPPORTED_PRESET_MODES:
+            if preset_mode not in self.preset_modes:
                 _LOGGER.warning(f"Fresh Air Fan {self.unique_id}: Unsupported preset mode for turn_on: {preset_mode}")
-                return # Or don't set preset
-            command_payload["mode"] = HA_PRESET_TO_API_MODE.get(preset_mode)
-            self._attr_preset_mode = preset_mode # Optimistic update
+            else:
+                command_payload["mode"] = HA_PRESET_TO_API_MODE.get(preset_mode)
+                self._attr_preset_mode = preset_mode # Optimistic
 
-        if percentage is not None:
-            if percentage == 0: # Turn off if percentage is 0
-                await self.async_turn_off()
-                return
-            command_payload["strength"] = percentage_to_ranged_value(API_SPEED_VALUES, percentage)
-            command_payload["auto_switch"] = API_FRESH_AIR_AUTO_OFF # Manual speed
-            self._attr_percentage = percentage # Optimistic update
+        if speed is not None:
+            if speed.lower() == FAN_SPEED_AUTO.lower():
+                command_payload["strength"] = 0 # As per mitmproxy for auto
+                command_payload["auto_switch"] = API_FRESH_AIR_AUTO_ON
+                self._attr_speed = FAN_SPEED_AUTO # Optimistic
+            elif speed.lower() in HA_SPEED_TO_API_STRENGTH:
+                command_payload["strength"] = HA_SPEED_TO_API_STRENGTH[speed.lower()]
+                command_payload["auto_switch"] = API_FRESH_AIR_AUTO_OFF # Manual speed
+                self._attr_speed = speed.lower() # Optimistic
+            else:
+                _LOGGER.warning(f"Fresh Air Fan {self.unique_id}: Unsupported speed for turn_on: {speed}")
         elif not preset_mode and not self._attr_is_on: 
-            # If just "turn_on" is called and it's off, and no specific preset/percentage,
-            # set to a default (e.g., low speed, or ensure switch_state=1 is sent)
-            # The newWindSwitch:1 should handle turning it on to its last/default state.
-            # If we want to force a speed/mode, add it here.
-            # For now, just sending newWindSwitch:1 is fine.
+            # If just "turn_on" and it's off, send switch_state=1. Device will use last/default.
+            # If we want to force a default speed (e.g. low), add it to command_payload here.
+            # command_payload["strength"] = HA_SPEED_TO_API_STRENGTH[FAN_SPEED_LOW]
+            # command_payload["auto_switch"] = API_FRESH_AIR_AUTO_OFF
             pass
-
 
         try:
             await self._api.async_set_fresh_air(self._device_id, **command_payload)
-            if update_optimistic_state:
-                self._attr_is_on = True
-                # Percentage/preset are updated above if provided
+            self._attr_is_on = True
             self.async_write_ha_state()
         except (TclApiError, TclAuthError) as e:
             _LOGGER.error(f"Fresh Air Fan {self.unique_id}: Error turning on/setting params: {e}")
@@ -257,34 +256,44 @@ class TclFreshAirFan(CoordinatorEntity, FanEntity):
         try:
             await self._api.async_set_fresh_air(self._device_id, switch_state=0)
             self._attr_is_on = False
-            self._attr_percentage = 0 # Typically fans show 0% when off
-            # self._attr_preset_mode = None # Or keep last preset? User preference. For now, keep.
+            self._attr_speed = None # No speed when off
             self.async_write_ha_state()
         except (TclApiError, TclAuthError) as e:
             _LOGGER.error(f"Fresh Air Fan {self.unique_id}: Error turning off: {e}")
         await self.coordinator.async_request_refresh()
 
-    async def async_set_percentage(self, percentage: int) -> None:
-        _LOGGER.info(f"Fresh Air Fan {self.unique_id}: Setting percentage to {percentage}")
-        if percentage == 0:
-            await self.async_turn_off()
+    async def async_set_speed(self, speed: str) -> None:
+        _LOGGER.info(f"Fresh Air Fan {self.unique_id}: Setting speed to {speed}")
+        
+        api_strength = None
+        auto_switch_val = API_FRESH_AIR_AUTO_OFF
+
+        if speed.lower() == FAN_SPEED_AUTO.lower():
+            api_strength = 0 # As per mitmproxy log for auto mode
+            auto_switch_val = API_FRESH_AIR_AUTO_ON
+        elif speed.lower() in HA_SPEED_TO_API_STRENGTH:
+            api_strength = HA_SPEED_TO_API_STRENGTH[speed.lower()]
+        else:
+            _LOGGER.warning(f"Fresh Air Fan {self.unique_id}: Unsupported speed: {speed}")
             return
 
-        api_strength = percentage_to_ranged_value(API_SPEED_VALUES, percentage)
-        
         try:
             await self._api.async_set_fresh_air(
                 self._device_id,
                 switch_state=1, # Ensure it's on
-                strength=int(api_strength),
-                auto_switch=API_FRESH_AIR_AUTO_OFF # Manual speed implies auto is off
+                strength=api_strength,
+                auto_switch=auto_switch_val
             )
-            self._attr_percentage = percentage
+            self._attr_speed = speed.lower()
             self._attr_is_on = True
             self.async_write_ha_state()
         except (TclApiError, TclAuthError) as e:
-            _LOGGER.error(f"Fresh Air Fan {self.unique_id}: Error setting percentage: {e}")
+            _LOGGER.error(f"Fresh Air Fan {self.unique_id}: Error setting speed: {e}")
         await self.coordinator.async_request_refresh()
+        
+    # Remove async_set_percentage as we are using named speeds with async_set_speed
+    # async def async_set_percentage(self, percentage: int) -> None:
+    #     ...
 
     async def async_set_preset_mode(self, preset_mode: str) -> None:
         _LOGGER.info(f"Fresh Air Fan {self.unique_id}: Setting preset mode to {preset_mode}")
@@ -314,46 +323,14 @@ class TclFreshAirFan(CoordinatorEntity, FanEntity):
             _LOGGER.error(f"Fresh Air Fan {self.unique_id}: Error setting preset mode: {e}")
         await self.coordinator.async_request_refresh()
 
-    # If we want to support a specific "auto" speed alongside LOW, MEDIUM, HIGH:
-    # We might need to use speed_list and set_speed instead of set_percentage if "auto" doesn't fit percentage model.
-    # For now, async_set_percentage handles manual speeds.
-    # An "auto" speed could be implemented by calling async_set_fresh_air with auto_switch=API_FRESH_AIR_AUTO_ON
-    # and strength=0 (as per mitmproxy logs for auto speed).
-
-    # Example of how to add specific speed names including "auto"
-    # @property
-    # def speed_list(self) -> list:
-    #    return [SPEED_OFF, SPEED_LOW, SPEED_MEDIUM, SPEED_HIGH, FAN_SPEED_AUTO]
-
-    # async def async_set_speed(self, speed: str) -> None:
-    #    _LOGGER.info(f"Fresh Air Fan {self.unique_id}: Setting speed to {speed}")
-    #    if speed == SPEED_OFF:
-    #        await self.async_turn_off()
-    #        return
-    #    
-    #    auto_mode = API_FRESH_AIR_AUTO_OFF
-    #    api_strength = None
-    #
-    #    if speed == FAN_SPEED_AUTO:
-    #        auto_mode = API_FRESH_AIR_AUTO_ON
-    #        api_strength = 0 # As per mitmproxy log for auto
-    #    elif speed in HA_SPEED_TO_API_STRENGTH:
-    #        api_strength = HA_SPEED_TO_API_STRENGTH[speed]
-    #    else:
-    #        _LOGGER.warning(f"Unsupported speed: {speed}")
-    #        return
-    #
-    #    try:
-    #        await self._api.async_set_fresh_air(
-    #            self._device_id, 
-    #            strength=api_strength, 
-    #            auto_switch=auto_mode
-    #        )
-    #        self._attr_is_on = True # if speed is not OFF
-    #        # Update internal speed/percentage state accordingly
-    #        self.async_write_ha_state()
-    #    except (TclApiError, TclAuthError) as e:
-    #        _LOGGER.error(f"Fresh Air Fan {self.unique_id}: Error setting speed: {e}")
-    #    await self.coordinator.async_request_refresh()
-
-```
+# Note on "auto" speed for Fresh Air:
+# The current implementation uses SET_SPEED (percentage) for manual speeds.
+# To implement a dedicated "auto" speed, we would need to:
+# 1. Add `FAN_SPEED_AUTO` to `SUPPORTED_SPEEDS` (if using named speeds) or handle it in `set_percentage`.
+# 2. Modify `async_set_percentage` or add `async_set_speed` to handle an "auto" input.
+#    This would involve calling `self._api.async_set_fresh_air` with `auto_switch=API_FRESH_AIR_AUTO_ON`
+#    and `strength=0` (based on mitmproxy logs for auto speed).
+# 3. Update `_update_attrs` to correctly set `self._attr_percentage` or `self._attr_speed`
+#    when `auto_switch == API_FRESH_AIR_AUTO_ON` is reported.
+# For now, "auto" speed for fresh air is primarily controlled by the device/app, and HA controls manual speeds.
+# The `_update_attrs` sets percentage to 100 if auto_switch is on, as a placeholder.
