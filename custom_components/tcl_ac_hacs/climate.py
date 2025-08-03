@@ -36,104 +36,46 @@ async def async_setup_entry(
     entry_data = hass.data[DOMAIN][entry.entry_id]
     api: TclAcApi = entry_data["api"]
     coordinators: Dict[str, DataUpdateCoordinator] = entry_data["coordinators"]
-    
+    all_devices_info: List[Dict[str, Any]] = entry_data["all_devices_info"]
+
     selected_device_ids: List[str] = entry.data.get(CONF_SELECTED_DEVICES, [])
+    entities_to_add = []
 
     if not selected_device_ids:
         _LOGGER.warning("No devices selected for TCL AC climate setup.")
         return
 
-    entities_to_add = []
-
-    if not entry_data["all_devices_info"]:
-        try:
-            _LOGGER.info("Climate Setup: Fetching all devices info for the first time.")
-            device_list_response = await api.get_devices()
-            if device_list_response and "data" in device_list_response:
-                entry_data["all_devices_info"] = device_list_response["data"]
-            else:
-                _LOGGER.error("Climate Setup: Failed to fetch initial device list or list is malformed.")
-                return 
-        except (TclApiError, TclAuthError) as e:
-            _LOGGER.error(f"Climate Setup: Error fetching device list: {e}")
-            return
-            
-    current_all_devices_info = entry_data["all_devices_info"]
+    if not all_devices_info:
+        _LOGGER.error("Climate Setup: all_devices_info is not populated (should be done by __init__.py). Cannot set up climate entities.")
+        return
 
     for device_id in selected_device_ids:
-        device_info_data = next((d for d in current_all_devices_info if d.get("deviceId") == device_id), None)
-        
+        device_info_data = next((d for d in all_devices_info if d.get("deviceId") == device_id), None)
         if not device_info_data:
-            _LOGGER.warning(f"Climate Setup: Device ID {device_id} selected but not found in API response. Skipping climate entity.")
+            _LOGGER.warning(f"Climate Setup: Device info for {device_id} not found in all_devices_info. Skipping climate entity.")
             continue
 
-        coordinator = None 
-        if device_id not in coordinators:
-            try:
-                device_shadow_data = await api.get_device_shadow(device_id)
-                if not device_shadow_data:
-                    _LOGGER.warning(f"Climate Setup: Device {device_id} shadow not found during setup. Skipping climate entity.")
-                    continue
-            except (TclApiError, TclAuthError) as e:
-                _LOGGER.error(f"Climate Setup: Error fetching device shadow for {device_id}: {e}")
-                continue
-
-            new_coordinator = DataUpdateCoordinator(
-                hass,
-                _LOGGER,
-                name=f"tcl_ac_device_{device_id}",
-                update_method=lambda dev_id=device_id: _async_update_data(api, dev_id),
-                update_interval=timedelta(seconds=DEFAULT_SCAN_INTERVAL),
-            )
-            new_coordinator.data = device_shadow_data
-            coordinators[device_id] = new_coordinator
-            coordinator = new_coordinator
-        else:
-            coordinator = coordinators[device_id]
-            if not coordinator.data:
-                try:
-                    device_shadow_data = await api.get_device_shadow(device_id)
-                    if not device_shadow_data:
-                        _LOGGER.warning(f"Climate Setup: Device {device_id} shadow not found for existing coordinator. Skipping.")
-                        continue
-                    coordinator.data = device_shadow_data
-                except (TclApiError, TclAuthError) as e:
-                    _LOGGER.error(f"Climate Setup: Error fetching shadow for existing coordinator {device_id}: {e}")
-                    continue
+        coordinator = coordinators.get(device_id)
+        if not coordinator:
+            _LOGGER.warning(f"Climate Setup: No coordinator found for device {device_id}. This should have been created in __init__.py. Skipping climate entity.")
+            continue
         
-        if coordinator and coordinator.data:
-            _LOGGER.info(f"Climate Setup: Preparing climate entity for device {device_info_data.get('nickName', device_id)}")
-            entity = TclClimateEntity(coordinator, api, device_info_data, coordinator.data)
-            entities_to_add.append(entity)
-        else:
-            _LOGGER.warning(f"Climate Setup: Skipping climate entity for {device_id} due to missing coordinator or coordinator data.")
+        if not coordinator.data: # Check if coordinator has initial data
+            _LOGGER.warning(f"Climate Setup: Coordinator for device {device_id} has no initial data (should be populated by __init__.py). Skipping climate entity.")
+            continue
+
+        _LOGGER.info(f"Climate Setup: Preparing climate entity for device {device_info_data.get('nickName', device_id)}")
+        entity = TclClimateEntity(coordinator, api, device_info_data, coordinator.data)
+        entities_to_add.append(entity)
 
     if entities_to_add:
-        async_add_entities(entities_to_add, update_before_add=False)
+        async_add_entities(entities_to_add, update_before_add=False) 
         _LOGGER.info(f"Added {len(entities_to_add)} TCL AC climate entities.")
     else:
         _LOGGER.warning("No TCL AC climate entities were added for this setup.")
 
-async def _async_update_data(api: TclAcApi, device_id: str) -> Dict[str, Any]:
-    """Fetch data for a single TCL AC device."""
-    _LOGGER.debug(f"Coordinator: Updating data for device {device_id}")
-    try:
-        device_data = await api.get_device_shadow(device_id)
-        if not device_data:
-            _LOGGER.warning(f"Coordinator: Device {device_id} shadow not found in API response during update.")
-            raise UpdateFailed(f"Device {device_id} shadow not found in API response.")
-        _LOGGER.debug(f"Coordinator: Found shadow data for {device_id}: {device_data}")
-        return device_data
-    except TclAuthError as err:
-        _LOGGER.error(f"Coordinator: Authentication error updating {device_id}: {err}")
-        raise UpdateFailed(f"Authentication error: {err}") from err
-    except TclApiError as err:
-        _LOGGER.error(f"Coordinator: API error updating {device_id}: {err}")
-        raise UpdateFailed(f"API error: {err}") from err
-    except Exception as err:
-        _LOGGER.error(f"Coordinator: Unexpected error updating {device_id}: {err}", exc_info=True)
-        raise UpdateFailed(f"Unexpected error: {err}") from err
-
+# The _async_update_data_local function is removed as it's no longer used.
+# Coordinator's update method is defined in __init__.py's _async_update_data_static.
 
 class TclClimateEntity(CoordinatorEntity, ClimateEntity):
     """Representation of a TCL AC Unit."""
