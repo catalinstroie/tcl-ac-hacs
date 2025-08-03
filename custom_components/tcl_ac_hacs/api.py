@@ -18,7 +18,7 @@ from .const import (
     CLIENT_ID, CONTENT_TYPE, GET_THINGS_URL, HARDCODED_IDENTITY_ID,
     REFRESH_TOKENS_URL, TH_APPBUILD, TH_PLATFORM, TH_VERSION, USER_AGENT,
     API_PARAM_NEW_WIND_SET_MODE, API_PARAM_NEW_WIND_STRENGTH,
-    API_PARAM_NEW_WIND_AUTO_SWITCH, API_PARAM_NEW_WIND_SWITCH,
+    API_PARAM_NEW_WIND_AUTO_SWITCH, API_PARAM_NEW_WIND_SWITCH, API_PARAM_SELF_CLEAN,
     API_PARAM_POWER_SWITCH, API_PARAM_VERTICAL_DIRECTION, API_PARAM_HORIZONTAL_DIRECTION,
 )
 
@@ -430,6 +430,8 @@ class TclAcApi:
         command = {}
         if switch_state is not None:
             command[API_PARAM_NEW_WIND_SWITCH] = switch_state
+            if switch_state == 1: # If turning on, also send selfClean: 0 as per logs
+                command[API_PARAM_SELF_CLEAN] = 0
         
         # Only add mode, strength, auto_switch if not explicitly turning off
         # Or if switch_state is 1 (on) or None (meaning we are just setting mode/speed on an already on device)
