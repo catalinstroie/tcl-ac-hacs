@@ -16,6 +16,7 @@ API_PARAM_NEW_WIND_SET_MODE = "newWindSetMode"
 API_PARAM_NEW_WIND_STRENGTH = "newWindStrength"
 API_PARAM_NEW_WIND_AUTO_SWITCH = "newWindAutoSwitch"
 API_PARAM_NEW_WIND_SWITCH = "newWindSwitch" # For master on/off of fresh air
+API_PARAM_SELF_CLEAN = "selfClean" # Added based on new log
 
 # Fresh Air Modes (for newWindSetMode)
 API_FRESH_AIR_MODE_FRESH = 1
@@ -45,7 +46,7 @@ FAN_SPEED_MEDIUM = "medium"
 FAN_SPEED_HIGH = "high"
 FAN_SPEED_AUTO = "auto"
 PLATFORMS = ["climate", "fan"]
-DEFAULT_SCAN_INTERVAL = 1800  # Default update interval in seconds
+DEFAULT_SCAN_INTERVAL = 180  # Default update interval in seconds
 
 # API constants
 ACCOUNT_LOGIN_URL = "https://pa.account.tcl.com/account/login?clientId=54148614"
